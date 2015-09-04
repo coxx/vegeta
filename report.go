@@ -1,12 +1,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
-	"sort"
 	"strings"
 
 	vegeta "github.com/tsenart/vegeta/lib"
@@ -15,37 +13,20 @@ import (
 func reportCmd() command {
 	fs := flag.NewFlagSet("vegeta report", flag.ExitOnError)
 	reporter := fs.String("reporter", "text", "Reporter [text, json, plot, hist[buckets]]")
+	window := fs.Uint64("window", ^uint64(0), "Window size to aggregate")
 	inputs := fs.String("inputs", "stdin", "Input files (comma separated)")
 	output := fs.String("output", "stdout", "Output file")
 	return command{fs, func(args []string) error {
 		fs.Parse(args)
-		return report(*reporter, *inputs, *output)
+		return report(*reporter, *inputs, *output, *window)
 	}}
 }
 
 // report validates the report arguments, sets up the required resources
-// and writes the report
-func report(reporter, inputs, output string) error {
+// and writes the report every window duration
+func report(reporter, inputs, output string, window uint64) error {
 	if len(reporter) < 4 {
 		return fmt.Errorf("bad reporter: %s", reporter)
-	}
-	var rep vegeta.Reporter
-	switch reporter[:4] {
-	case "text":
-		rep = vegeta.ReportText
-	case "json":
-		rep = vegeta.ReportJSON
-	case "plot":
-		rep = vegeta.ReportPlot
-	case "hist":
-		if len(reporter) < 6 {
-			return fmt.Errorf("bad buckets: '%s'", reporter[4:])
-		}
-		var hist vegeta.HistogramReporter
-		if err := hist.Set(reporter[4:]); err != nil {
-			return err
-		}
-		rep = hist
 	}
 
 	files := strings.Split(inputs, ",")
@@ -58,6 +39,7 @@ func report(reporter, inputs, output string) error {
 		defer in.Close()
 		srcs[i] = in
 	}
+	dec := vegeta.NewDecoder(srcs...)
 
 	out, err := file(output, true)
 	if err != nil {
@@ -65,34 +47,31 @@ func report(reporter, inputs, output string) error {
 	}
 	defer out.Close()
 
-	var results vegeta.Results
-	res, errs := vegeta.Collect(srcs...)
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	if window == 0 {
+		return errors.New("bad window: got 0, want: [1..]")
+	}
 
-outer:
-	for {
-		select {
-		case _ = <-sig:
-			break outer
-		case r, ok := <-res:
-			if !ok {
-				break outer
-			}
-			results = append(results, r)
-		case err, ok := <-errs:
-			if !ok {
-				break outer
-			}
+	var rep vegeta.Reporter
+	switch reporter[:4] {
+	case "text":
+		rep = &vegeta.TextReporter{}
+	case "json":
+		rep = &vegeta.JSONReporter{}
+	case "plot":
+		if want := ^uint64(0); window != want {
+			return fmt.Errorf("bad window for plot report: must be default %d", want)
+		}
+		rep = &vegeta.PlotReporter{}
+	case "hist":
+		if len(reporter) < 6 {
+			return fmt.Errorf("bad buckets: '%s'", reporter[4:])
+		}
+		var hr vegeta.HistogramReporter
+		if err := hr.Buckets.UnmarshalText([]byte(reporter[4:])); err != nil {
 			return err
 		}
+		rep = &hr
 	}
 
-	sort.Sort(results)
-	data, err := rep.Report(results)
-	if err != nil {
-		return err
-	}
-	_, err = out.Write(data)
-	return err
+	return vegeta.Report(dec, rep, out, window)
 }

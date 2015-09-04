@@ -1,43 +1,34 @@
 package vegeta
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 )
 
-// Dumper is an interface defining Results dumping.
-type Dumper interface {
-	Dump(*Result) ([]byte, error)
-}
+// CSVDumper implements the Reporter interface by reporting a Result as a CSV
+// record with six columns. The columns are: unix timestamp in ns since epoch,
+// http status code, request latency in ns, bytes out, bytes in, and lastly the error.
+type CSVDumper struct{ Result }
 
-// DumperFunc is an adapter to allow the use of ordinary functions as
-// Dumpers. If f is a function with the appropriate signature, DumperFunc(f)
-// is a Dumper object that calls f.
-type DumperFunc func(*Result) ([]byte, error)
-
-// Dump implements the Dumper interface.
-func (f DumperFunc) Dump(r *Result) ([]byte, error) { return f(r) }
-
-// DumpCSV dumps a Result as a CSV record with six columns.
-// The columns are: unix timestamp in ns since epoch, http status code,
-// request latency in ns, bytes out, bytes in, and lastly the error.
-var DumpCSV DumperFunc = func(r *Result) ([]byte, error) {
-	var buf bytes.Buffer
-	_, err := fmt.Fprintf(&buf, "%d,%d,%d,%d,%d,\"%s\"\n",
-		r.Timestamp.UnixNano(),
-		r.Code,
-		r.Latency.Nanoseconds(),
-		r.BytesOut,
-		r.BytesIn,
-		r.Error,
+// Report partially implements the Reporter interface.
+func (d CSVDumper) Report(w io.Writer) error {
+	_, err := fmt.Fprintf(w, "%d,%d,%d,%d,%d,\"%s\"\n",
+		d.Timestamp.UnixNano(),
+		d.Code,
+		d.Latency.Nanoseconds(),
+		d.BytesOut,
+		d.BytesIn,
+		d.Error,
 	)
-	return buf.Bytes(), err
+	return err
 }
 
-// DumpJSON dumps a Result as a JSON object.
-var DumpJSON DumperFunc = func(r *Result) ([]byte, error) {
-	var buf bytes.Buffer
-	err := json.NewEncoder(&buf).Encode(r)
-	return buf.Bytes(), err
+// JSONDumper implements the Reporter interface by reporting a Result as a JSON
+// object.
+type JSONDumper struct{ Result }
+
+// Report partially implements the Reporter interface.
+func (d JSONDumper) Report(w io.Writer) error {
+	return json.NewEncoder(w).Encode(d.Result)
 }

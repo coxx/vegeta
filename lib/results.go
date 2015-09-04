@@ -3,7 +3,6 @@ package vegeta
 import (
 	"encoding/gob"
 	"io"
-	"sync"
 	"time"
 )
 
@@ -22,45 +21,54 @@ type Result struct {
 	Error     string        `json:"error"`
 }
 
-// Collect concurrently reads Results from multiple io.Readers until all of
-// them return io.EOF. Each read Result is passed to the returned Results channel
-// while errors will be put in the returned error channel.
-func Collect(in ...io.Reader) (<-chan *Result, <-chan error) {
-	var wg sync.WaitGroup
-	resc := make(chan *Result)
-	errs := make(chan error)
+// End returns the time at which a Result ended.
+func (r *Result) End() time.Time { return r.Timestamp.Add(r.Latency) }
 
-	for i := range in {
-		wg.Add(1)
-		go func(src io.Reader) {
-			dec := gob.NewDecoder(src)
-			for {
-				var r Result
-				if err := dec.Decode(&r); err != nil {
-					if err == io.EOF {
-						wg.Done()
-						return
-					}
-					errs <- err
-					continue
-				}
-				resc <- &r
-			}
-		}(in[i])
+// Add partially implements the Reporter interface.
+func (r *Result) Add(other Result) { *r = other }
+
+// Results is a slice of Results.
+type Results []Result
+
+// Add partially implements the Reporter interface.
+func (rs *Results) Add(r Result) { *rs = append(*rs, r) }
+
+// The following methods implement sort.Interface
+func (rs Results) Len() int           { return len(rs) }
+func (rs Results) Less(i, j int) bool { return rs[i].Timestamp.Before(rs[j].Timestamp) }
+func (rs Results) Swap(i, j int)      { rs[i], rs[j] = rs[j], rs[i] }
+
+// A Decoder decodes a Result and returns an error in case of failure.
+type Decoder func(*Result) error
+
+// NewDecoder returns a new Result decoder closure for the given io.Readers.
+// It round robins across the io.Readers on every invocation and decoding error.
+func NewDecoder(readers ...io.Reader) Decoder {
+	dec := make([]*gob.Decoder, len(readers))
+	for i := range readers {
+		dec[i] = gob.NewDecoder(readers[i])
 	}
-
-	go func() {
-		wg.Wait()
-		close(resc)
-		close(errs)
-	}()
-
-	return resc, errs
+	var seq uint64
+	return func(r *Result) (err error) {
+		for range dec {
+			robin := seq % uint64(len(dec))
+			seq++
+			if err = dec[robin].Decode(r); err != nil {
+				continue
+			}
+			return nil
+		}
+		return err
+	}
 }
 
-// Results is a slice of pointers to results with sorting behavior attached.
-type Results []*Result
+// An Encoder encodes a Result and returns an error in case of failure.
+type Encoder func(*Result) error
 
-func (r Results) Len() int           { return len(r) }
-func (r Results) Less(i, j int) bool { return r[i].Timestamp.Before(r[j].Timestamp) }
-func (r Results) Swap(i, j int)      { r[i], r[j] = r[j], r[i] }
+// NewEncoder returns a new Result encoder closure for the given io.Writer
+func NewEncoder(r io.Writer) Encoder {
+	enc := gob.NewEncoder(r)
+	return func(r *Result) error {
+		return enc.Encode(r)
+	}
+}
